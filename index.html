@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Finde deinen Tisch</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; padding: 24px; }
+    .card { max-width: 560px; margin: 0 auto; padding: 18px; border: 1px solid #e5e5e5; border-radius: 16px; box-shadow: 0 6px 18px rgba(0,0,0,.06); }
+    h1 { font-size: 22px; margin: 0 0 10px; }
+    p { margin: 0 0 14px; color: #333; line-height: 1.35; }
+    input { width: 100%; padding: 14px 12px; font-size: 16px; border-radius: 12px; border: 1px solid #ccc; }
+    .hint { font-size: 13px; color: #666; margin-top: 10px; }
+    .result { margin-top: 16px; padding: 14px; border-radius: 12px; background: #f6f7f9; }
+    .big { font-size: 22px; font-weight: 700; margin-top: 6px; }
+    .error { background: #fff2f2; border: 1px solid #ffd0d0; }
+    .ok { border: 1px solid #e1e6ff; }
+    .small { font-size: 13px; color: #555; margin-top: 6px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Finde deinen Tisch</h1>
+    <p>Tippe deinen <b>Nachnamen</b> (oder Vor- und Nachnamen) ein.</p>
+
+    <input id="q" autocomplete="off" placeholder="z. B. Müller oder Anna Müller" />
+
+    <div id="status" class="hint">Lade Gästeliste…</div>
+    <div id="out"></div>
+
+    <div class="hint">Probleme? Frag kurz am Empfang nach.</div>
+  </div>
+
+<script>
+  // 1) HIER deine veröffentlichte CSV-URL eintragen:
+  const CSV_URL = "PASTE_YOUR_CSV_URL_HERE";
+
+  // Helper: normalize for flexible search (case/umlauts/whitespace)
+  const norm = (s) => (s ?? "")
+    .toString()
+    .trim()
+    .toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // remove accents
+    .replace(/ß/g, "ss")
+    .replace(/\s+/g, " ");
+
+  let guests = [];
+
+  function parseCSV(text) {
+    // Basic CSV parser that supports quoted commas
+    const rows = [];
+    let row = [], cur = "", inQ = false;
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (c === '"' ) {
+        if (inQ && text[i+1] === '"') { cur += '"'; i++; }
+        else inQ = !inQ;
+      } else if (c === ',' && !inQ) {
+        row.push(cur); cur = "";
+      } else if ((c === '\n' || c === '\r') && !inQ) {
+        if (c === '\r' && text[i+1] === '\n') i++;
+        row.push(cur); cur = "";
+        if (row.some(v => v.length)) rows.push(row);
+        row = [];
+      } else {
+        cur += c;
+      }
+    }
+    row.push(cur);
+    if (row.some(v => v.length)) rows.push(row);
+    return rows;
+  }
+
+  async function load() {
+    const status = document.getElementById("status");
+    try {
+      const res = await fetch(CSV_URL, { cache: "no-store" });
+      if (!res.ok) throw new Error("CSV nicht erreichbar");
+      const text = await res.text();
+      const rows = parseCSV(text);
+
+      const header = rows[0].map(h => norm(h));
+      const idxVor = header.indexOf("vorname");
+      const idxNach = header.indexOf("nachname");
+      const idxTisch = header.indexOf("tisch");
+      const idxHinweis = header.indexOf("hinweis"); // optional
+
+      if (idxVor === -1 || idxNach === -1 || idxTisch === -1) {
+        throw new Error("Spalten müssen heißen: vorname, nachname, tisch");
+      }
+
+      guests = rows.slice(1).map(r => ({
+        vorname: (r[idxVor] ?? "").trim(),
+        nachname: (r[idxNach] ?? "").trim(),
+        tisch: (r[idxTisch] ?? "").trim(),
+        hinweis: idxHinweis >= 0 ? (r[idxHinweis] ?? "").trim() : ""
+      })).filter(g => g.nachname && g.tisch);
+
+      status.textContent = `Bereit. (${guests.length} Gäste geladen)`;
+    } catch (e) {
+      status.textContent = `Fehler: ${e.message}`;
+    }
+  }
+
+  function renderMatches(matches) {
+    const out = document.getElementById("out");
+    out.innerHTML = "";
+
+    if (!matches.length) {
+      const div = document.createElement("div");
+      div.className = "result error";
+      div.innerHTML = `Kein Treffer. Bitte prüfe die Schreibweise oder frag am Empfang nach.`;
+      out.appendChild(div);
+      return;
+    }
+
+    // If multiple matches, show a short list (handles duplicate surnames)
+    if (matches.length > 1) {
+      const div = document.createElement("div");
+      div.className = "result ok";
+      div.innerHTML = `<b>Mehrere Treffer:</b><div class="small">Tippe Vor- und Nachnamen, um es einzugrenzen.</div>`;
+      const ul = document.createElement("ul");
+      ul.style.margin = "10px 0 0";
+      ul.style.paddingLeft = "18px";
+      matches.slice(0, 12).forEach(m => {
+        const li = document.createElement("li");
+        li.innerHTML = `${m.vorname} ${m.nachname} — <b>Tisch ${m.tisch}</b>${m.hinweis ? ` <span class="small">(${m.hinweis})</span>` : ""}`;
+        ul.appendChild(li);
+      });
+      div.appendChild(ul);
+      out.appendChild(div);
+      return;
+    }
+
+    const m = matches[0];
+    const div = document.createElement("div");
+    div.className = "result ok";
+    div.innerHTML = `<div>${m.vorname} ${m.nachname}</div><div class="big">Tisch ${m.tisch}</div>${m.hinweis ? `<div class="small">${m.hinweis}</div>` : ""}`;
+    out.appendChild(div);
+  }
+
+  function search(qRaw) {
+    const q = norm(qRaw);
+    const out = document.getElementById("out");
+    if (!q || q.length < 2) { out.innerHTML = ""; return; }
+
+    // Match strategy:
+    // - If user typed 2 words => must match both somewhere in "vor nach"
+    // - Else => match surname contains query OR full name contains query
+    const parts = q.split(" ").filter(Boolean);
+
+    let matches = [];
+    if (parts.length >= 2) {
+      matches = guests.filter(g => {
+        const full = norm(`${g.vorname} ${g.nachname}`);
+        return parts.every(p => full.includes(p));
+      });
+    } else {
+      matches = guests.filter(g => {
+        const full = norm(`${g.vorname} ${g.nachname}`);
+        const nach = norm(g.nachname);
+        return nach.includes(q) || full.includes(q);
+      });
+    }
+
+    // Prefer exact surname match first
+    const exactNach = guests.filter(g => norm(g.nachname) === q);
+    if (exactNach.length) matches = exactNach;
+
+    renderMatches(matches);
+  }
+
+  document.getElementById("q").addEventListener("input", (e) => search(e.target.value));
+  load();
+</script>
+</body>
+</html>
