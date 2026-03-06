@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Gästeliste</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; padding: 24px; }
+    .card { max-width: 620px; margin: 0 auto; padding: 18px; border: 1px solid #e5e5e5; border-radius: 16px; box-shadow: 0 6px 18px rgba(0,0,0,.06); }
+    h1 { font-size: 22px; margin: 0 0 10px; }
+    p { margin: 0 0 14px; color: #333; line-height: 1.35; }
+    input { width: 100%; padding: 14px 12px; font-size: 16px; border-radius: 12px; border: 1px solid #ccc; }
+    .hint { font-size: 13px; color: #666; margin-top: 10px; }
+    .result { margin-top: 16px; padding: 14px; border-radius: 12px; background: #f6f7f9; }
+    .big { font-size: 18px; font-weight: 700; margin-top: 6px; }
+    .error { background: #fff2f2; border: 1px solid #ffd0d0; }
+    .ok { border: 1px solid #d9f7e8; }
+    ul { margin: 10px 0 0; padding-left: 18px; }
+    li { margin: 6px 0; }
+    .small { font-size: 13px; color: #555; margin-top: 6px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Gästeliste</h1>
+    <p>Tippe deinen <b>Familiennamen</b> ein (z. B. „Azubuki“, „Müller“, „Botnang“).</p>
+
+    <input id="q" autocomplete="off" placeholder="Familienname eingeben…" />
+
+    <div id="status" class="hint">Lade Gästeliste…</div>
+    <div id="out"></div>
+
+    <div class="hint">Falls du dich nicht findest: bitte kurz am Empfang nachfragen.</div>
+  </div>
+
+<script>
+  // ✅ HIER deinen veröffentlichten CSV-Link aus Google Sheets eintragen:
+  const CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQY9r14b74e0ZmkDYQDAz_n2MRBfU2f_LDvvDVE2hcH3qNbPZi0PQVCCL7yjmQwWJPpPQyq5pJXlHDD/pub?gid=1265843000&single=true&output=csv";
+
+  // Normalisierung für Suche (Umlaute, Groß/Klein, Leerzeichen)
+  const norm = (s) => (s ?? "")
+    .toString()
+    .trim()
+    .toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // accents raus
+    .replace(/ß/g, "ss")
+    .replace(/[()]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  // Titel/Prefix entfernen (damit "Mr/Mrs Azubuki" mit "Azubuki" gefunden wird)
+  function stripTitles(s) {
+    let t = norm(s);
+    // Entferne häufige Titel am Anfang
+    t = t.replace(/^(mr\/mrs|mr & mrs|mr\.?\/mrs\.?|mrs|mr|ms|miss|dr|prof)\s+/g, "");
+    // manchmal mehrere Titel/Leerzeichen
+    t = t.replace(/^(mr\/mrs|mr & mrs|mr\.?\/mrs\.?|mrs|mr|ms|miss|dr|prof)\s+/g, "");
+    return t.trim();
+  }
+
+  // Erzeuge Such-Schlüssel für jeden Eintrag:
+  // - full: kompletter Eintrag ohne Titel (z.B. "chief ons& wife")
+  // - last: letztes Wort (z.B. "azubuki", "botnang", "paul")
+  // - tokens: alle Wörter als Set (für Teiltreffer)
+  function makeKeys(display) {
+    const cleaned = stripTitles(display);
+    const full = cleaned;
+    const words = cleaned.split(" ").filter(Boolean);
+    const last = words.length ? words[words.length - 1] : "";
+    const tokens = new Set(words);
+    return { full, last, tokens };
+  }
+
+  // Minimaler CSV Parser (quoted commas)
+  function parseCSV(text) {
+    const rows = [];
+    let row = [], cur = "", inQ = false;
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (c === '"') {
+        if (inQ && text[i+1] === '"') { cur += '"'; i++; }
+        else inQ = !inQ;
+      } else if (c === ',' && !inQ) {
+        row.push(cur); cur = "";
+      } else if ((c === '\n' || c === '\r') && !inQ) {
+        if (c === '\r' && text[i+1] === '\n') i++;
+        row.push(cur); cur = "";
+        if (row.some(v => v.length)) rows.push(row);
+        row = [];
+      } else {
+        cur += c;
+      }
+    }
+    row.push(cur);
+    if (row.some(v => v.length)) rows.push(row);
+    return rows;
+  }
+
+  let guests = [];
+
+  async function load() {
+    const status = document.getElementById("status");
+    try {
+      const res = await fetch(CSV_URL, { cache: "no-store" });
+      if (!res.ok) throw new Error("CSV nicht erreichbar (Link prüfen / veröffentlicht?)");
+      const text = await res.text();
+      const rows = parseCSV(text);
+      if (!rows.length) throw new Error("CSV ist leer");
+
+      const header = rows[0].map(h => norm(h));
+      const idxName =
+        header.indexOf("familienname") >= 0 ? header.indexOf("familienname") :
+        header.indexOf("familyname") >= 0 ? header.indexOf("familyname") :
+        header.indexOf("name") >= 0 ? header.indexOf("name") : -1;
+
+      const idxHint = header.indexOf("hinweis"); // optional
+
+      if (idxName === -1) throw new Error("Spalte muss 'Familienname' heißen (Header in A1).");
+
+      guests = rows.slice(1)
+        .map(r => {
+          const display = (r[idxName] ?? "").trim();
+          const hint = idxHint >= 0 ? (r[idxHint] ?? "").trim() : "";
+          if (!display) return null;
+          const keys = makeKeys(display);
+          return { display, hint, ...keys };
+        })
+        .filter(Boolean);
+
+      status.textContent = `Bereit. (${guests.length} Einträge geladen)`;
+    } catch (e) {
+      status.textContent = `Fehler: ${e.message}`;
+    }
+  }
+
+  function render(matches, q) {
+    const out = document.getElementById("out");
+    out.innerHTML = "";
+
+    if (!q) return;
+
+    if (!matches.length) {
+      const div = document.createElement("div");
+      div.className = "result error";
+      div.innerHTML = `Kein Treffer für <b>${q}</b>. Bitte prüfe die Schreibweise oder frag am Empfang nach.`;
+      out.appendChild(div);
+      return;
+    }
+
+    // Wenn genau 1 Treffer: groß anzeigen
+    if (matches.length === 1) {
+      const m = matches[0];
+      const div = document.createElement("div");
+      div.className = "result ok";
+      div.innerHTML = `<div class="big">Gefunden ✅</div>
+                       <div>${m.display}${m.hint ? ` <span class="small">(${m.hint})</span>` : ""}</div>`;
+      out.appendChild(div);
+      return;
+    }
+
+    // mehrere Treffer: Liste zeigen
+    const div = document.createElement("div");
+    div.className = "result ok";
+    div.innerHTML = `<b>${matches.length} Treffer</b><div class="small">Wenn zu viele: tippe genauer (z. B. kompletter Nachname).</div>`;
+    const ul = document.createElement("ul");
+    matches.slice(0, 20).forEach(m => {
+      const li = document.createElement("li");
+      li.innerHTML = `${m.display}${m.hint ? ` <span class="small">(${m.hint})</span>` : ""}`;
+      ul.appendChild(li);
+    });
+    div.appendChild(ul);
+    out.appendChild(div);
+  }
+
+  function search(raw) {
+    const q = stripTitles(raw); // falls jemand "Mr Müller" eintippt
+    if (q.length < 2) { document.getElementById("out").innerHTML = ""; return; }
+
+    // Match-Regeln:
+    // 1) exakter Match auf "letztes Wort" (best für Familienname)
+    // 2) enthält im full-string
+    // 3) enthält als Token
+    const qn = q;
+    const matchesExactLast = guests.filter(g => g.last === qn);
+    let matches = matchesExactLast;
+
+    if (!matches.length) {
+      matches = guests.filter(g => g.full.includes(qn));
+    }
+    if (!matches.length) {
+      matches = guests.filter(g => g.tokens.has(qn));
+    }
+
+    // Falls jemand nur Teil eingibt: "mul" -> "muller"
+    if (!matches.length && qn.length >= 3) {
+      matches = guests.filter(g => g.full.includes(qn));
+    }
+
+    // Sortierung: exakte last zuerst, dann alphabetisch
+    matches.sort((a,b) => (a.display.localeCompare(b.display)));
+
+    render(matches, qn);
+  }
+
+  document.getElementById("q").addEventListener("input", (e) => search(e.target.value));
+  load();
+</script>
+</body>
+</html>
